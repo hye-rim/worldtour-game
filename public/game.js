@@ -81,13 +81,20 @@ let best = Number(store.get('worldtourBest')) || 0;
 let pausedFrom = null, cpuT = 0, busy = 0, diceShow = null, diceT = 0;
 let logLines = [], banner = { text: '', sub: '', t: 0 }, shownPos = G.players.map(() => 0), moveQueue = [];
 let tutorialRig = false;
+let turnEnd = 0, secAcc = 0;
+let ME = 0, online = false, room = null, netDown = false, endShownFor = -1;     // 온라인: ME 는 내 자리 번호, room 은 서버가 보낸 방 상태
+const SESSION_KEY = 'worldtourSession';
+const loadSession = () => { try { return JSON.parse(sessionStorage.getItem(SESSION_KEY)); } catch (_) { return null; } };
+const saveSession = (v) => { try { v ? sessionStorage.setItem(SESSION_KEY, JSON.stringify(v)) : sessionStorage.removeItem(SESSION_KEY); } catch (_) {} };
+const myName = () => String(store.get('worldtourName') || '').slice(0, 8);
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* @test-hooks:start */
 window.__wt = { get G() { return G; }, get state() { return state; }, L, setG(g) { G = g; }, step: (dt) => update(dt) };
 /* @test-hooks:end */
 
 // ---------- 흐름 ----------
-function bindOverlay() { document.querySelectorAll('#overlay button').forEach((b) => { b.onclick = () => onOverlayButton(b.dataset.level); }); }
+function bindOverlay() { document.querySelectorAll('#overlay button').forEach((b) => { b.onclick = () => (b.dataset.act ? onAct(b.dataset.act) : onOverlayButton(b.dataset.level)); }); }
 function showOverlay(html) { const o = $('overlay'); o.innerHTML = html; o.classList.remove('hidden'); bindOverlay(); }
 function hideOverlay() { $('overlay').classList.add('hidden'); }
 const LEVEL_BUTTONS = '<div class="lv"><button id="startBtn" data-level="easy">쉬움<small>컴퓨터가 소극적이에요</small></button><button id="startBtn2" data-level="normal">보통<small>컴퓨터가 적극적이에요</small></button></div><p class="note">쉬움에서는 최고 기록이 저장되지 않아요</p>';
@@ -98,6 +105,7 @@ function startGame(level) {
   level = level || store.get('worldtourLevel');
   level = level === 'normal' ? 'normal' : 'easy';
   store.set('worldtourLevel', level);
+  online = false; ME = 0; room = null;
   G = L.newGame(Math.random, { level, first: tut ? 0 : undefined });
   tutorialRig = tut;
   shownPos = G.players.map(() => 0); moveQueue = []; logLines = []; diceShow = null; cpuT = 0; busy = 0;
@@ -106,7 +114,7 @@ function startGame(level) {
   handleEvents(); refresh();
 }
 function pause() {
-  if (state !== 'play') return;
+  if (state !== 'play' || online) return;
   pausedFrom = state; state = 'paused';
   showOverlay('<h2>일시정지</h2><p>P 키나 아래 버튼으로 계속해요</p><button id="startBtn">계속하기</button>');
 }
@@ -116,21 +124,21 @@ const nm = (i) => G.players[i].name;
 const tn = (i) => L.BOARD[i].name;
 const log = (t, color) => { logLines.push({ t, color }); if (logLines.length > 5) logLines.shift(); };
 
-function handleEvents() {
-  const evs = G.events; G.events = [];
+function handleEvents(list) {
+  const evs = list || G.events; if (!list) G.events = [];
   for (const e of evs) {
     const c = e.who !== undefined ? COLORS[e.who] : '#fff';
-    if (e.t === 'turn') { if (e.who === 0 && state === 'play') sfx.step(); }
-    else if (e.t === 'dice') { diceShow = [e.a, e.b]; diceT = 0; sfx.dice(); log(`${nm(e.who)} 주사위 ${e.a}+${e.b}=${e.a + e.b}${e.a === e.b ? ' (더블!)' : ''}`, c); if (e.who === 0) tutorialSignal('roll'); }
+    if (e.t === 'turn') { if (e.who === ME && state === 'play') sfx.step(); }
+    else if (e.t === 'dice') { diceShow = [e.a, e.b]; diceT = 0; sfx.dice(); log(`${nm(e.who)} 주사위 ${e.a}+${e.b}=${e.a + e.b}${e.a === e.b ? ' (더블!)' : ''}`, c); if (e.who === ME) tutorialSignal('roll'); }
     else if (e.t === 'move') { moveQueue.push({ who: e.who, to: e.to, steps: e.steps, direct: !!e.direct }); }
-    else if (e.t === 'salary') { log(`${nm(e.who)} 월급 +${e.amount}만`, c); if (e.who === 0) sfx.get(); }
-    else if (e.t === 'buy') { log(`${nm(e.who)} ${tn(e.tile)} 구매 -${e.amount}만`, c); sfx.buy(); if (e.who === 0) tutorialSignal('buy'); }
-    else if (e.t === 'build') { log(`${nm(e.who)} ${tn(e.tile)} ${L.LEVEL_NAMES[e.level]} 건설 -${e.amount}만`, c); sfx.build(); if (e.who === 0) tutorialSignal('build'); }
-    else if (e.t === 'toll') { log(`${nm(e.who)} → ${nm(e.to)} 통행료 ${e.amount}만 (${tn(e.tile)})`, c); sfx.pay(); if (e.who === 0) { setBanner('통행료!', `${nm(e.to)}에게 ${e.amount}만 원`, 1.6); tutorialSignal('toll'); } else if (e.to === 0) { sfx.get(); setBanner('통행료 수입!', `${nm(e.who)}에게서 ${e.amount}만 원`, 1.6); } }
+    else if (e.t === 'salary') { log(`${nm(e.who)} 월급 +${e.amount}만`, c); if (e.who === ME) sfx.get(); }
+    else if (e.t === 'buy') { log(`${nm(e.who)} ${tn(e.tile)} 구매 -${e.amount}만`, c); sfx.buy(); if (e.who === ME) tutorialSignal('buy'); }
+    else if (e.t === 'build') { log(`${nm(e.who)} ${tn(e.tile)} ${L.LEVEL_NAMES[e.level]} 건설 -${e.amount}만`, c); sfx.build(); if (e.who === ME) tutorialSignal('build'); }
+    else if (e.t === 'toll') { log(`${nm(e.who)} → ${nm(e.to)} 통행료 ${e.amount}만 (${tn(e.tile)})`, c); sfx.pay(); if (e.who === ME) { setBanner('통행료!', `${nm(e.to)}에게 ${e.amount}만 원`, 1.6); tutorialSignal('toll'); } else if (e.to === ME) { sfx.get(); setBanner('통행료 수입!', `${nm(e.who)}에게서 ${e.amount}만 원`, 1.6); } }
     else if (e.t === 'tax') { log(`${nm(e.who)} 사회복지기금 납부 -${e.amount}만`, c); sfx.pay(); }
     else if (e.t === 'fundtake') { log(`${nm(e.who)} 사회복지기금 수령 +${e.amount}만`, c); sfx.get(); if (e.amount) setBanner('기금 수령!', `+${e.amount}만 원`, 1.4); }
-    else if (e.t === 'key') { log(`${nm(e.who)} 황금열쇠: ${e.text}`, c); sfx.key(); setBanner('황금열쇠', e.text, 2.6); if (e.who === 0) tutorialSignal('key'); }
-    else if (e.t === 'island') { log(`${nm(e.who)} 무인도로!`, c); sfx.island(); if (e.who === 0) tutorialSignal('island'); }
+    else if (e.t === 'key') { log(`${nm(e.who)} 황금열쇠: ${e.text}`, c); sfx.key(); setBanner('황금열쇠', e.text, 2.6); if (e.who === ME) tutorialSignal('key'); }
+    else if (e.t === 'island') { log(`${nm(e.who)} 무인도로!`, c); sfx.island(); if (e.who === ME) tutorialSignal('island'); }
     else if (e.t === 'tripledouble') setBanner('더블 세 번!', '무인도로 가요', 2);
     else if (e.t === 'free') log(`${nm(e.who)} 무인도 탈출 (${e.how === 'double' ? '더블' : e.how === 'card' ? '탈출권' : '20만 원'})`, c);
     else if (e.t === 'stay') log(`${nm(e.who)} 무인도에 머무름 (${e.turns}/3)`, c);
@@ -143,12 +151,13 @@ function handleEvents() {
   }
 }
 function showEnd() {
-  const won = G.winner === 0, nw = L.netWorth(G, 0);
+  if (online && room) endShownFor = room.games;
+  const won = G.winner === ME, nw = L.netWorth(G, ME);
   (won ? sfx.win : sfx.lose)();
   const rows = G.players.map((p, i) => `<tr><td style="color:${COLORS[i]}">${p.name}</td><td>${p.bankrupt ? '파산' : L.netWorth(G, i) + '만'}</td></tr>`).join('');
   let extra = '';
-  if (G.difficulty === 'normal' && won && nw > best) { best = nw; store.set('worldtourBest', String(best)); extra = '<p>🏆 최고 기록!</p>'; }
-  setTimeout(() => showOverlay(`<h2>${won ? '🏆 내가 1등!' : `${nm(G.winner)} 승리`}</h2><p class="big">${G.round > G.maxRounds ? `${G.maxRounds}바퀴 끝 · 자산 1등` : '마지막까지 살아남았어요'}</p><table style="font-size:13px;border-spacing:10px 2px">${rows}</table>${extra}${LEVEL_BUTTONS}`), 1200);
+  if (!online && G.difficulty === 'normal' && won && nw > best) { best = nw; store.set('worldtourBest', String(best)); extra = '<p>🏆 최고 기록!</p>'; }
+  setTimeout(() => showOverlay(`<h2>${won ? '🏆 내가 1등!' : `${nm(G.winner)} 승리`}</h2><p class="big">${G.round > G.maxRounds ? `${G.maxRounds}바퀴 끝 · 자산 1등` : '마지막까지 살아남았어요'}</p><table style="font-size:13px;border-spacing:10px 2px">${rows}</table>${extra}${online ? `<div class="lv"><button data-act="rematch">한 판 더${room && room.rematch.length ? ` (${room.rematch.length}명 기다림)` : ''}</button><button data-act="leave">나가기</button></div>` : LEVEL_BUTTONS}`), 1200);
 }
 
 // ---------- 매 프레임 ----------
@@ -165,9 +174,11 @@ function update(dt) {
     refresh(); return;
   }
   busy = Math.max(0, busy - dt);
+  if (online) { secAcc += dt; if (secAcc > 0.5) { secAcc = 0; refresh(); } }
+  if (online) G.players.forEach((p, i) => { if (shownPos[i] !== p.pos && !moveQueue.length) shownPos[i] = p.pos; });
   if (G.phase === 'over') return;
   const p = G.players[G.turn];
-  if (!p.human) {
+  if (!online && !p.human) {
     cpuT += dt;
     if (cpuT >= 0.9 && busy <= 0) { cpuT = 0; L.cpuStep(G); handleEvents(); refresh(); }
   } else cpuT = 0;
@@ -175,16 +186,17 @@ function update(dt) {
 let stepTimer = 0;
 
 // ---------- 버튼 ----------
-const myTurn = () => state === 'play' && G.phase !== 'over' && G.players[G.turn].human && !moveQueue.length;
+const myTurn = () => state === 'play' && G.phase !== 'over' && G.turn === ME && G.players[ME].human && !moveQueue.length;
 function setBtn(id, text, on, small = '') { const b = $(id); b.classList.toggle('hidden', !text); b.innerHTML = text ? text + (small ? `<small>${small}</small>` : '') : ''; b.disabled = !on; }
 function refresh() {
-  const mine = myTurn(), p = G.players[0];
+  const mine = myTurn(), p = G.players[ME];
   let hint = '';
+  if (state !== 'play') { setBtn('btnMain', '', false); setBtn('btnSecond', '', false); setBtn('btnThird', '', false); $('hint').textContent = ''; return; }
   setBtn('btnMain', '', false); setBtn('btnSecond', '', false); setBtn('btnThird', '', false);
   if (G.phase === 'over') { $('hint').textContent = ''; return; }
   if (!mine) {
     setBtn('btnMain', '기다리는 중…', false);
-    hint = G.players[G.turn].human ? '' : `${G.players[G.turn].name} 차례`;
+    hint = G.turn === ME ? '' : `${G.players[G.turn].name} 차례`;
   } else if (G.phase === 'roll') {
     if (p.jailTurns > 0) {
       setBtn('btnMain', '주사위 굴리기', true, '더블이면 탈출');
@@ -197,21 +209,28 @@ function refresh() {
     if (pd.type === 'buy') { setBtn('btnMain', `구매 ${pd.cost}만`, true, tn(pd.tile)); setBtn('btnSecond', '안 사요', true); hint = `${tn(pd.tile)}을(를) 살까요? (가진 돈 ${p.cash}만)`; }
     else { setBtn('btnMain', `${L.LEVEL_NAMES[pd.level]} 짓기 ${pd.cost}만`, true, tn(pd.tile)); setBtn('btnSecond', '안 지어요', true); hint = `${tn(pd.tile)}에 건물을 지을까요? (통행료가 올라가요)`; }
   } else if (G.phase === 'space') { setBtn('btnMain', '가고 싶은 칸을 눌러요', false); hint = '우주여행! 판에서 도착할 칸을 눌러요'; }
+  if (online && netDown) hint = '연결이 끊겼어요… 다시 연결하는 중';
+  else if (online && room && room.remain > 0 && G.phase !== 'over') hint += ` · ${Math.max(0, Math.ceil((turnEnd - performance.now()) / 1000))}초`;
   $('hint').textContent = hint;
+}
+// 하는 일을 한 곳으로: 혼자 하기는 바로 규칙에 넣고, 온라인은 서버에 보낸다 (결과는 서버가 보내는 방 상태로 받는다)
+function act(type, extra = {}) {
+  if (online) { net.raw('act', { type, ...extra }); return; }
+  if (type === 'roll') L.roll(G); else if (type === 'buy') L.buy(G); else if (type === 'build') L.build(G); else if (type === 'skip') L.skip(G);
+  else if (type === 'payJail') L.payJail(G); else if (type === 'escape') L.useEscape(G); else if (type === 'space') L.chooseSpace(G, extra.tile);
+  handleEvents(); refresh();
 }
 function primary() {
   if (!myTurn()) return;
-  if (G.phase === 'roll') { rigDice(); L.roll(G); }
-  else if (G.phase === 'decide') { G.pending.type === 'buy' ? L.buy(G) : L.build(G); }
-  handleEvents(); refresh();
+  if (G.phase === 'roll') { if (!online) rigDice(); act('roll'); }
+  else if (G.phase === 'decide') act(G.pending.type === 'buy' ? 'buy' : 'build');
 }
 function secondary() {
   if (!myTurn()) return;
-  if (G.phase === 'roll' && G.players[0].jailTurns > 0) L.payJail(G);
-  else if (G.phase === 'decide') L.skip(G);
-  handleEvents(); refresh();
+  if (G.phase === 'roll' && G.players[ME].jailTurns > 0) act('payJail');
+  else if (G.phase === 'decide') act('skip');
 }
-function third() { if (!myTurn()) return; if (G.phase === 'roll' && G.players[0].escape > 0) L.useEscape(G); handleEvents(); refresh(); }
+function third() { if (!myTurn()) return; if (G.phase === 'roll' && G.players[ME].escape > 0) act('escape'); }
 // 튜토리얼: 첫 주사위는 살 수 있는 도시(홍콩)에 멈추도록 3(1+2)을 던진다
 function rigDice() {
   if (!tutorialRig) return;
@@ -224,12 +243,106 @@ $('btnMain').onclick = primary; $('btnSecond').onclick = secondary; $('btnThird'
 addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase();
-  if (state === 'title') { if (k === 'enter' || k === ' ') { e.preventDefault(); onOverlayButton(); } return; }
+  if (state === 'title') { if ((k === 'enter' || k === ' ') && ($('overlay').dataset.screen || 'title') === 'title' && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); onOverlayButton(); } return; }
   if (state === 'paused') { if (k === 'p' || k === 'enter') resume(); return; }
   if (!$('overlay').classList.contains('hidden')) { if (k === 'enter' || k === ' ') { e.preventDefault(); onOverlayButton(); } return; }
   if (k === 'p') pause(); else if (k === 'm') toggleMute();
   else if (k === ' ' || k === 'enter') { e.preventDefault(); primary(); } else if (k === 'n') secondary();
 });
+
+
+// ---------- 온라인 ----------
+const TITLE_HTML = () => `<h1>세계 일주<br>보드게임</h1>
+  <p>주사위를 굴려 도시를 사고 건물을 지어요! 🌏<br>다른 사람이 내 땅에 오면 통행료를 받아요. 돈은 게임용이에요</p>
+  <div class="help"><span class="pc">⌨️ Space/Enter 굴리기·확인 · N 건너뛰기 · 우주여행은 가고 싶은 칸을 눌러요</span><span class="touch">👆 아래 버튼으로 굴리고 사고 지어요</span></div>
+  <div class="lv"><button id="startBtn" data-level="easy">쉬움<small>컴퓨터가 소극적이에요</small></button><button id="startBtn2" data-level="normal">보통<small>컴퓨터가 적극적이에요</small></button></div>
+  ${/[?&]tutorial=1/.test(location.search) ? '' : `<div class="lv"><button class="sub" data-act="online">🌐 온라인 대전<small>친구와 방 코드로 · 빠른 대전</small></button></div>`}`;
+function showTitle() { $('overlay').dataset.screen = 'title'; showOverlay(TITLE_HTML()); }
+function showScreen(name, html) { showOverlay(html); $('overlay').dataset.screen = name; }
+function showOnlineMenu(msg = '') {
+  showScreen('menu', `<h2>🌐 온라인 대전</h2><p class="note">최대 4명이 함께해요. 모자란 자리는 컴퓨터가 채워요</p>
+    <input id="nameInput" maxlength="8" placeholder="이름 (8자까지)" value="${esc(myName())}" style="padding:9px;border-radius:10px;border:2px solid #4a8ab8;background:#0a1e30;color:#fff;font-size:15px;text-align:center;width:200px">
+    ${msg ? `<p style="color:#ffb0b0;font-size:13px">${esc(msg)}</p>` : ''}
+    <div class="lv"><button data-act="quick">빠른 대전<small>2명이 모이면 바로</small></button><button data-act="create">방 만들기<small>코드로 친구 초대</small></button></div>
+    <div class="lv"><input id="codeInput" maxlength="4" placeholder="방 코드" style="padding:9px;border-radius:10px;border:2px solid #4a8ab8;background:#0a1e30;color:#fff;font-size:16px;text-align:center;width:100px;text-transform:uppercase"><button class="sub" data-act="join">입장</button></div>
+    <div class="lv"><button class="sub" data-act="back">← 돌아가기</button></div>`);
+}
+function showQueued() { showScreen('queued', `<h2>상대를 찾는 중…</h2><p class="note">한 명이 더 오면 바로 시작해요</p><div class="lv"><button class="sub" data-act="cancel">취소</button></div>`); }
+function showWaiting(r) {
+  const list = r.players.map((p, i) => `<div style="font-size:15px;color:${COLORS[i]}">${i === r.you ? '👉 ' : ''}${esc(p.name)}${i === 0 ? ' (방장)' : ''}${p.online ? '' : ' · 끊김'}</div>`).join('');
+  showScreen('waiting', `<h2>대기실</h2><p>친구에게 이 코드를 알려 주세요</p><div style="font-size:40px;font-weight:900;letter-spacing:.15em;color:#7fd8ff">${esc(r.code)}</div>${list}
+    <p class="note">${r.players.length}명 · 모자란 자리는 컴퓨터가 채워요</p>
+    <div class="lv">${r.host ? `<button data-act="start" ${r.players.length < 2 ? 'disabled' : ''}>시작하기${r.players.length < 2 ? '<small>2명 이상 필요</small>' : ''}</button>` : '<p class="note">방장이 시작하길 기다려요</p>'}<button class="sub" data-act="leave">나가기</button></div>`);
+}
+const net = {
+  ws: null, pulse: null, outbox: [], retry: 0,
+  connect() {
+    if (this.ws && this.ws.readyState <= 1) return;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}${location.pathname}`);
+    this.ws = ws;
+    ws.onopen = () => {
+      this.retry = 0;
+      this.raw('hello', { name: myName() });
+      const sess = loadSession();
+      if (sess) this.raw('resume', sess);
+      for (const [t, p] of this.outbox.splice(0)) this.raw(t, p);
+      clearInterval(this.pulse);
+      this.pulse = setInterval(() => this.raw('pulse'), 10000);
+    };
+    ws.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch (_) { return; } onNet(m); };
+    ws.onclose = () => {
+      clearInterval(this.pulse);
+      if (this.ws !== ws) return;
+      this.ws = null;
+      if (!online && !loadSession()) return;
+      if (room || loadSession()) { netDown = true; refresh(); setTimeout(() => this.connect(), Math.min(4000, 500 * 2 ** this.retry++)); }
+      else showOnlineMenu('서버와 연결이 끊겼어요. 다시 시도해 주세요.');
+    };
+  },
+  send(t, p = {}) { if (this.ws && this.ws.readyState === 1) this.raw(t, p); else { this.outbox.push([t, p]); this.connect(); } },
+  raw(t, p = {}) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({ t, ...p })); },
+  close() { const ws = this.ws; this.ws = null; this.outbox = []; clearInterval(this.pulse); if (ws) ws.close(); },
+};
+function onNet(m) {
+  if (m.t === 'queued') showQueued();
+  else if (m.t === 'room') applyRoom(m);
+  else if (m.t === 'error') { room = null; online = false; saveSession(null); state = 'title'; showOnlineMenu(m.msg); }
+  else if (m.t === 'resumeFailed') { saveSession(null); netDown = false; if (room) { room = null; online = false; state = 'title'; showOnlineMenu('대국이 끝나서 이어갈 수 없어요.'); } }
+}
+function applyRoom(r) {
+  const fresh = !room || room.code !== r.code || room.games !== r.games;
+  room = r; online = true; ME = r.you; netDown = false;
+  saveSession({ code: r.code, token: r.token });
+  turnEnd = performance.now() + r.remain;
+  if (r.state === 'waiting') { state = 'title'; showWaiting(r); return; }
+  G = { players: r.players.map((p) => ({ ...p })), props: r.props, fund: r.fund, round: r.round, maxRounds: r.maxRounds, turn: r.turn, phase: r.phase, pending: r.pending, last: r.last, winner: r.winner, difficulty: 'normal', events: [] };
+  if (fresh) {
+    shownPos = G.players.map((p) => p.pos); moveQueue = []; logLines = []; diceShow = null; endShownFor = -1; state = 'play'; hideOverlay();
+    setBanner('출발!', `${G.players[G.turn].name} 먼저`, 2); sfx.start();
+  }
+  handleEvents(r.events);
+  if (r.state === 'over' && endShownFor !== r.games && !(r.events || []).some((e) => e.t === 'over')) showEnd();
+  refresh();
+}
+function leaveOnline() {
+  net.raw('leave'); net.close(); saveSession(null);
+  room = null; online = false; ME = 0; netDown = false; state = 'title'; moveQueue = []; showTitle();
+}
+function onAct(a) {
+  const nameEl = $('nameInput');
+  if (nameEl) { const n = nameEl.value.trim().slice(0, 8); store.set('worldtourName', n); }
+  if (a === 'online') { showOnlineMenu(); return; }
+  if (a === 'back') { showTitle(); return; }
+  if (a === 'quick' || a === 'create' || a === 'join') {
+    if (a === 'join') { const code = ($('codeInput').value || '').trim().toUpperCase(); if (code.length !== 4) { showOnlineMenu('방 코드 4글자를 적어 주세요.'); return; } net.send('hello', { name: myName() }); net.send('join', { code }); return; }
+    net.send('hello', { name: myName() }); net.send(a); return;
+  }
+  if (a === 'cancel') { net.raw('cancel'); net.close(); showOnlineMenu(); return; }
+  if (a === 'start') net.raw('start');
+  else if (a === 'rematch') net.raw('rematch');
+  else if (a === 'leave') leaveOnline();
+}
 
 // ---------- 그리기 ----------
 function tileRect(i) {
@@ -314,7 +427,7 @@ function draw() {
 canvas.addEventListener('pointerdown', (e) => {
   if (!(state === 'play' && G.phase === 'space' && myTurn())) return;
   const r = canvas.getBoundingClientRect(), x = (e.clientX - r.left) * W / r.width, y = (e.clientY - r.top) * H / r.height;
-  for (let i = 0; i < 32; i++) { const t = tileRect(i); if (x >= t.x && x <= t.x + t.w && y >= t.y && y <= t.y + t.h) { if (L.chooseSpace(G, i)) { handleEvents(); refresh(); } return; } }
+  for (let i = 0; i < 32; i++) { const t = tileRect(i); if (x >= t.x && x <= t.x + t.w && y >= t.y && y <= t.y + t.h) { act('space', { tile: i }); return; } }
 });
 
 let last = 0;
@@ -329,6 +442,7 @@ function toggleMute() { muted = !muted; store.set('worldtourMuted', muted ? '1' 
 $('muteBtn').onclick = (e) => { e.currentTarget.blur(); toggleMute(); };
 $('pauseBtn').onclick = (e) => { e.currentTarget.blur(); state === 'paused' ? resume() : pause(); };
 bindOverlay();
+if (loadSession() && !/[?&]tutorial=1/.test(location.search)) { online = true; net.connect(); } else showTitle();
 $('muteBtn').textContent = muted ? '🔇' : '🔊';
 addEventListener('blur', pause);
 document.addEventListener('visibilitychange', () => { if (document.hidden) pause(); });

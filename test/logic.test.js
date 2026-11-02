@@ -2,7 +2,7 @@
 // 세계 일주 보드게임 규칙 시험. 실행: node --test
 const test = require('node:test');
 const assert = require('node:assert');
-const L = require('../logic.js');
+const L = require('../public/logic.js');
 
 const fresh = (seed = 4, opts = {}) => L.newGame(L.rng(seed), { first: 0, ...opts });
 const evs = (st, t) => st.events.filter((e) => e.t === t);
